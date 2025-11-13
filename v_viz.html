@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Musical Weather</title>
+    <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@400;700&family=Allura&family=Great+Vibes&family=Pacifico&display=swap" rel="stylesheet">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #fffef0;
+        }
+        
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+            background: #fffef0;
+            padding: 20px 20px 20px 20px;
+            padding-top: 20px;
+            border-radius: 8px;
+            box-shadow: none;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: flex-start;
+        }
+        
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+            margin-bottom: 20px;
+            margin-left: 0;
+            width: 100%;
+            justify-content: flex-start;
+            padding-left: 150px; /* Align with heatmap - matches left margin */
+            overflow: visible; /* Ensure labels aren't clipped */
+        }
+        
+        #legend-container {
+            overflow: visible; /* Ensure legend labels aren't clipped */
+        }
+        
+        h1 {
+            text-align: left;
+            color: #333;
+            margin-bottom: 5px;
+            margin-top: 0;
+            margin-left: 20px;
+            font-family: 'Dancing Script', 'Allura', 'Great Vibes', 'Pacifico', cursive;
+            font-style: normal;
+            font-size: 3.5em;
+            position: relative;
+            background: linear-gradient(90deg, 
+                #e6f7ff 0%, 
+                #cceeff 10%, 
+                #b3e6ff 20%, 
+                #99ddff 30%, 
+                #80d4ff 40%, 
+                #66ccff 50%, 
+                #4dc3ff 60%, 
+                #33bbff 70%, 
+                #1ab2ff 80%, 
+                #00aaff 90%, 
+                #0099e6 100%);
+            background-size: 200% 100%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: glitter 6s linear infinite;
+        }
+        
+        @keyframes glitter {
+            0% {
+                background-position: 0% 50%;
+            }
+            100% {
+                background-position: 200% 50%;
+            }
+        }
+        
+        #chart {
+            display: flex;
+            justify-content: flex-start;
+            align-items: flex-start;
+            width: 100%;
+            min-height: 600px;
+            background: #fffef0;
+            border: none;
+            border-radius: 4px;
+            padding: 0;
+            padding-top: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+        
+        #chart svg {
+            display: block;
+            margin: 0;
+        }
+        
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 1000;
+            white-space: nowrap !important;
+            max-width: none !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
+        
+        .row-label {
+            font-size: 10px;
+            fill: #333;
+            text-anchor: end;
+        }
+        
+        .axis-label {
+            font-size: 11px;
+            fill: #333;
+        }
+        
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+        <h1>Musical Weather</h1>
+            <div id="legend-container"></div>
+        </div>
+        <div id="chart"></div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+
+    <script>
+        // Wait for libraries to load
+        window.addEventListener('DOMContentLoaded', function() {
+            if (typeof d3 === 'undefined') {
+                document.getElementById('chart').innerHTML = '<p style="color: red; padding: 50px; text-align: center;">Error: D3.js library failed to load. Please check your internet connection.</p>';
+                return;
+            }
+            
+                const margin = {top: 20, right: 50, bottom: 50, left: 150};
+            const height = 1000 - margin.top - margin.bottom;
+            const tooltip = d3.select("#tooltip");
+
+            // Audio manager for playing song clips on hover
+            const audioManager = {
+                currentAudio: null,
+                currentSong: null,
+                audioCache: {},
+                
+                // Sanitize song name for filename (remove special characters, spaces, etc.)
+                sanitizeFilename: function(songName) {
+                    return songName
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]/g, '_') // Replace all non-alphanumeric with underscore
+                        .replace(/_+/g, '_') // Replace multiple underscores with single
+                        .replace(/^_|_$/g, ''); // Remove leading/trailing underscores
+                },
+                
+                // Get audio file path for a song
+                // Tries multiple formats in order of preference
+                getAudioPath: function(songName) {
+                    const filename = this.sanitizeFilename(songName);
+                    // Audio files should be placed in an 'audio' folder relative to the HTML file
+                    // File naming: convert song name to lowercase with underscores
+                    // Example: "Bad Habit by Steve Lacy" -> "audio/bad_habit_by_steve_lacy.mp3"
+                    // Supported formats: .mp3, .mp4, .wav, .ogg, .m4a
+                    // Try multiple formats - will use first one that exists
+                    const formats = ['mp3', 'mp4', 'wav', 'ogg', 'm4a'];
+                    return formats.map(format => `audio/${filename}.${format}`);
+                },
+                
+                // Play audio for a song
+                playSong: function(songName) {
+                    // If same song is already playing, don't restart
+                    if (this.currentSong === songName && this.currentAudio && !this.currentAudio.paused) {
+                        return;
+                    }
+                    
+                    // Stop current audio if playing
+                    this.stop();
+                    
+                    // Check if we have this audio cached
+                    let audio = this.audioCache[songName];
+                    
+                    if (!audio) {
+                        // Create new audio element
+                        audio = new Audio();
+                        
+                        // Try multiple file formats
+                        const possiblePaths = this.getAudioPath(songName);
+                        const sanitized = this.sanitizeFilename(songName);
+                        console.log(`Attempting to play: "${songName}"`);
+                        console.log(`Sanitized filename: "${sanitized}"`);
+                        console.log(`Trying paths:`, possiblePaths);
+                        
+                        let currentFormatIndex = 0;
+                        
+                        // Start with first format
+                        audio.src = possiblePaths[0];
+                        currentFormatIndex = 1;
+                        
+                        audio.volume = 0.5; // Set volume to 50% (adjust as needed)
+                        audio.preload = 'auto';
+                        
+                        // Handle errors gracefully - try next format
+                        audio.addEventListener('error', function(e) {
+                            console.log(`Error loading ${possiblePaths[currentFormatIndex - 1]}:`, e);
+                            if (currentFormatIndex < possiblePaths.length) {
+                                console.log(`Trying next format: ${possiblePaths[currentFormatIndex]}`);
+                                audio.src = possiblePaths[currentFormatIndex];
+                                currentFormatIndex++;
+                            } else {
+                                console.log(`All formats failed for: ${songName}`);
+                            }
+                        });
+                        
+                        // Log successful load
+                        audio.addEventListener('loadeddata', function() {
+                            console.log(`Successfully loaded: ${audio.src}`);
+                        });
+                        
+                        this.audioCache[songName] = audio;
+                    }
+                    
+                    // Play the audio
+                    const playAudio = () => {
+                        audio.currentTime = 0; // Start from beginning
+                        audio.play().catch(err => {
+                            // Silently handle play errors (autoplay restrictions, etc.)
+                        });
+                    };
+                    
+                    // If audio is ready, play immediately; otherwise wait for it to load
+                    if (audio.readyState >= 2) {
+                        playAudio();
+                    } else {
+                        audio.addEventListener('canplay', playAudio, { once: true });
+                    }
+                    
+                    this.currentAudio = audio;
+                    this.currentSong = songName;
+                },
+                
+                // Stop current audio
+                stop: function() {
+                    if (this.currentAudio) {
+                        this.currentAudio.pause();
+                        this.currentAudio.currentTime = 0;
+                        // Clear references immediately
+                        this.currentAudio = null;
+                        this.currentSong = null;
+                    }
+                }
+            };
+
+            // CSV data embedded (using D3's csvParse for proper D3.js pattern)
+            const csvData = `Song,Winter,Fall,Summer,Spring,Hot,Sunny,Rainy,Cold,Snowy,Cloudy,Breezy
+Bad Habit by Steve Lacy,no,no,yes,yes,yes,yes,no,no,no,no,yes
+cz by Mk.gee,no,no,yes,no,yes,yes,yes,no,no,no,no
+Overtime (pt 1) by Mk.gee,yes,no,no,yes,yes,yes,no,no,no,no,yes
+I CARE by Turnstile,yes,no,yes,yes,yes,yes,no,yes,no,yes,no
+I Wanna be Adored by The Stone Roses,yes,no,yes,no,yes,yes,yes,yes,no,yes,yes
+(Don't Fear) The Reaper by Blue Oyster Cult,no,no,no,no,no,no,yes,yes,yes,yes,yes
+Sunday by Yuck,yes,yes,yes,no,yes,no,yes,yes,yes,yes,yes
+September Again by Nation of Language,yes,yes,yes,yes,yes,yes,yes,no,no,yes,no
+SPEED DEMON by Justin Bieber,no,no,yes,no,yes,yes,no,no,no,no,yes
+Teen Need by New Look,no,no,yes,yes,yes,yes,yes,yes,no,no,yes
+PETTING ZOO by Justin Bieber,yes,no,no,no,no,no,yes,yes,no,yes,yes
+Be Apart by Porches,yes,no,yes,no,no,yes,yes,yes,no,yes,yes
+Okay by Porches,no,no,yes,yes,yes,yes,no,no,no,no,yes
+Corinne by Metronomy,no,no,yes,yes,yes,yes,no,no,no,no,yes
+Marinade by DOPE LEMON,yes,no,yes,no,yes,yes,yes,yes,yes,yes,yes
+Lovers Carvings by Bibio,no,no,yes,yes,yes,yes,yes,no,no,no,yes
+Incinerate by Sonic Youth,yes,no,yes,yes,yes,yes,yes,yes,yes,no,no
+Empathy by Crystal Castles,yes,no,no,no,no,no,yes,yes,yes,yes,no
+FOOL by Jan Romina,no,no,yes,no,yes,yes,no,no,no,no,no
+Spell #6 by Part Time,yes,no,no,yes,yes,yes,yes,yes,no,yes,yes
+Thieves Like Us by New Order,no,no,yes,yes,no,no,no,yes,yes,yes,yes
+Hypernight by Title Fight,yes,no,no,no,no,no,no,yes,yes,yes,yes
+Like You by Dux Content,no,no,yes,yes,yes,yes,no,yes,no,no,no
+Are You Looking Up by Mk.gee,yes,yes,no,yes,no,no,yes,yes,yes,yes,yes
+Are You with Me Now? By Cate Le Bon,no,no,yes,yes,yes,yes,yes,no,no,no,yes
+Marilyn by Mount Kimbie,yes,no,yes,yes,no,yes,yes,yes,yes,no,yes
+DAISIES by Justin Bieber,no,no,yes,yes,no,yes,no,no,no,no,yes
+YUKON by Justin Bieber,yes,no,yes,no,yes,yes,yes,yes,yes,yes,yes
+Die Hard by Kendrick Lamar,no,no,yes,no,yes,yes,no,no,no,no,yes
+Drawn (feat. Little Dragon) by De La Soul,no,no,yes,no,no,yes,no,no,no,no,yes
+SLOWDIVE by Turnstile,yes,no,no,yes,no,no,no,yes,no,yes,no
+Lady Daydream by Twin Sister,yes,no,no,no,no,no,yes,yes,yes,yes,yes
+Goodie Bag by Still Woozy,no,no,yes,yes,yes,yes,no,no,no,no,yes
+Visions of Your Reality by Ultimate Spinach,yes,no,no,no,yes,no,yes,yes,no,yes,yes
+How to Fly by Sticky Fingers,yes,yes,yes,no,yes,no,yes,yes,yes,yes,yes
+Baby I'm Bleeding by JPEGMAFIA,no,no,yes,no,yes,yes,no,no,no,no,yes
+"Paycheck, Raincheck by Isaac Winemiller",yes,no,yes,no,no,yes,yes,yes,yes,yes,no
+Start a War by The National,yes,no,no,no,no,no,yes,yes,yes,yes,yes
+Everything Goes My Way by Metronomy,no,no,yes,yes,yes,yes,no,no,no,no,yes
+Undercurrent by Toro y Moi, Don Toliver & Porches,yes,yes,no,no,no,no,yes,yes,yes,yes,no
+Green Eyes by Wavves,no,no,yes,no,yes,yes,no,no,no,no,no
+Heaven's Only Wishful by MorMor,yes,yes,yes,yes,yes,no,yes,yes,yes,yes,yes
+What Once Was by Her's,no,no,yes,yes,yes,yes,no,no,no,no,yes
+A Pearl by Mitski,yes,no,no,no,yes,no,yes,yes,no,yes,yes
+Scratchcard Lanyard by Dry Cleaning,no,no,yes,yes,yes,yes,no,no,no,yes,no
+Redbone by Childish Gambino,yes,no,no,no,yes,no,yes,yes,yes,yes,no`;
+
+            try {
+                // Parse CSV data using D3's csvParse function
+                const rawData = d3.csvParse(csvData);
+                console.log("Data loaded:", rawData);
+                
+                // Debug: Check for Paycheck song
+                const paycheckRow = rawData.find(row => row.Song && row.Song.includes("Paycheck"));
+                if (paycheckRow) {
+                    console.log("Found Paycheck row:", paycheckRow);
+                    console.log("Paycheck Song value:", paycheckRow.Song);
+                }
+                
+                // Filter out rows where Song is empty
+                const data = rawData.filter(row => row.Song && row.Song.trim() !== "");
+                
+                // Clean and normalize the data - handle empty values as "no"
+                data.forEach(row => {
+                    Object.keys(row).forEach(key => {
+                        if (key !== "Song") {
+                            const value = (row[key] || "").trim().toLowerCase();
+                            // Normalize yes/no values (handle "Yes", "No", "yes", "no", etc.)
+                            if (value === "yes" || value === "y") {
+                                row[key] = "yes";
+                            } else {
+                                row[key] = "no";
+                            }
+                        }
+                    });
+                });
+                
+                // Get weather columns (all columns except Song)
+                const allColumns = Object.keys(data[0] || {});
+                const weatherColumns = allColumns.filter(d => d !== "Song" && d !== "");
+                const songs = data.map(d => d.Song).filter(d => d && d.trim() !== "");
+                
+                // Calculate total associations per song
+                const songAssociationCounts = {};
+                data.forEach((row) => {
+                    let count = 0;
+                    weatherColumns.forEach((weather) => {
+                        if (row[weather].toLowerCase() === "yes") {
+                            count++;
+                        }
+                    });
+                    songAssociationCounts[row.Song] = count;
+                });
+                
+                const maxAssociations = Math.max(...Object.values(songAssociationCounts));
+                console.log("Max associations:", maxAssociations);
+                
+                // Prepare data for heatmap
+                const heatmapData = [];
+                data.forEach((row, i) => {
+                    const songAssociations = songAssociationCounts[row.Song];
+                    weatherColumns.forEach((weather, j) => {
+                        const isAssociated = row[weather].toLowerCase() === "yes";
+                        // Value is based on number of associations for the song
+                        // 0 = no association, 1 = one association, 2+ = multiple associations
+                        // Normalize to 0-1 scale where 0 = no, 0.5 = one, 1 = max associations
+                        let value = 0;
+                        if (isAssociated) {
+                            if (songAssociations === 1) {
+                                value = 0.5; // One association
+                            } else if (songAssociations > 1) {
+                                // Scale from 0.5 to 1 based on number of associations
+                                value = 0.5 + (songAssociations - 1) / (maxAssociations - 1) * 0.5;
+                            }
+                        }
+                        
+                        heatmapData.push({
+                            song: row.Song,
+                            weather: weather,
+                            value: value,
+                            isAssociated: isAssociated,
+                            songAssociations: songAssociations,
+                            songIndex: i,
+                            weatherIndex: j
+                        });
+                    });
+                });
+                
+                console.log("Heatmap data:", heatmapData);
+                
+                // Hierarchical Clustering Function
+                function hierarchicalClustering(data, distanceFn) {
+                    // Initialize clusters - each song is its own cluster
+                    let clusters = data.map((d, i) => ({
+                        id: i,
+                        items: [i],
+                        height: 0
+                    }));
+                    
+                    const clusterHistory = [];
+                    
+                    while (clusters.length > 1) {
+                        let minDist = Infinity;
+                        let mergeI = 0, mergeJ = 0;
+                        
+                        // Find the two closest clusters
+                        for (let i = 0; i < clusters.length; i++) {
+                            for (let j = i + 1; j < clusters.length; j++) {
+                                const dist = distanceFn(clusters[i].items, clusters[j].items, data);
+                                if (dist < minDist) {
+                                    minDist = dist;
+                                    mergeI = i;
+                                    mergeJ = j;
+                                }
+                            }
+                        }
+                        
+                        // Merge the two closest clusters
+                        const newCluster = {
+                            id: clusters.length,
+                            items: [...clusters[mergeI].items, ...clusters[mergeJ].items],
+                            height: minDist,
+                            left: clusters[mergeI],
+                            right: clusters[mergeJ]
+                        };
+                        
+                        clusterHistory.push({
+                            left: clusters[mergeI],
+                            right: clusters[mergeJ],
+                            height: minDist
+                        });
+                        
+                        // Remove merged clusters and add new one
+                        clusters = clusters.filter((_, idx) => idx !== mergeI && idx !== mergeJ);
+                        clusters.push(newCluster);
+                    }
+                    
+                    return clusterHistory;
+                }
+                
+                // Distance function - Euclidean distance between weather patterns
+                function euclideanDistance(indices1, indices2, data) {
+                    let sumSq = 0;
+                    const n = weatherColumns.length;
+                    
+                    indices1.forEach(i1 => {
+                        indices2.forEach(i2 => {
+                            weatherColumns.forEach((weather, wIdx) => {
+                                const val1 = data[i1][weather] === "yes" ? 1 : 0;
+                                const val2 = data[i2][weather] === "yes" ? 1 : 0;
+                                sumSq += Math.pow(val1 - val2, 2);
+                            });
+                        });
+                    });
+                    
+                    return Math.sqrt(sumSq / (indices1.length * indices2.length * n));
+                }
+                
+                // Perform clustering
+                const clusterHistory = hierarchicalClustering(data, euclideanDistance);
+                
+                // Get leaf order from dendrogram (bottom-up traversal)
+                function getLeafOrder(node, order = []) {
+                    if (!node.left && !node.right) {
+                        // Leaf node
+                        if (node.items && node.items.length === 1) {
+                            order.push(node.items[0]);
+                        }
+                    } else {
+                        if (node.left) getLeafOrder(node.left, order);
+                        if (node.right) getLeafOrder(node.right, order);
+                    }
+                    return order;
+                }
+                
+                // Get the final cluster tree
+                const finalCluster = clusterHistory.length > 0 ? 
+                    { left: clusterHistory[clusterHistory.length - 1].left, 
+                      right: clusterHistory[clusterHistory.length - 1].right } : null;
+                
+                // Order songs alphabetically
+                const orderedIndices = data
+                    .map((row, i) => ({
+                        index: i,
+                        song: row.Song
+                    }))
+                    .sort((a, b) => {
+                        // Sort alphabetically by song name
+                        return a.song.localeCompare(b.song);
+                    })
+                    .map(d => d.index);
+                
+                // Reorder songs alphabetically
+                const orderedSongs = orderedIndices.map(i => songs[i]);
+                
+                // Calculate cell size - weather on y-axis, songs on x-axis
+                const numSongs = orderedSongs.length;
+                const numWeather = weatherColumns.length;
+                
+                console.log("Number of songs:", numSongs);
+                console.log("Number of weather types:", numWeather);
+                
+                // Calculate cell size to ensure all columns fit
+                // Set minimum cell size to ensure all 48 songs are visible
+                const minCellSize = 10; // Minimum cell size in pixels to ensure visibility
+                const cellSizeY = height / numWeather;
+                
+                // Cell height (halved from original)
+                const cellSizeYIncreased = cellSizeY * 0.5;
+                
+                // Calculate cell size based on available viewport width
+                const viewportWidth = window.innerWidth || 1920;
+                const containerPadding = 100; // Account for container padding
+                const availableWidth = viewportWidth - containerPadding - margin.left - margin.right;
+                
+                // Calculate cell size - make boxes about double width
+                const cellSizeX = (availableWidth / numSongs) * 2;
+                
+                // Use width for x-axis, increased height for y-axis (allows rectangular cells)
+                // This ensures all columns fit while making cells taller
+                const cellSize = cellSizeX; // Use width-based size for x-axis
+                const cellHeight = cellSizeYIncreased; // Use increased height for y-axis
+                
+                // If calculated cell size is too small, use minimum
+                const finalCellSize = Math.max(cellSize, minCellSize);
+                
+                const heatmapWidth = finalCellSize * numSongs;
+                const heatmapHeight = cellHeight * numWeather;
+                
+                // Calculate total width - legend is now in header, not in SVG
+                const totalWidth = heatmapWidth + margin.left + margin.right;
+                
+                console.log("Number of songs:", numSongs);
+                console.log("Viewport width:", viewportWidth);
+                console.log("Available width:", availableWidth);
+                console.log("Cell size:", cellSize);
+                console.log("Heatmap width:", heatmapWidth);
+                console.log("Total width:", totalWidth);
+                
+                // Create scales - songs on x-axis, weather on y-axis
+                const xScale = d3.scaleBand()
+                    .domain(orderedSongs)
+                    .range([0, heatmapWidth])
+                    .padding(0.01);
+                
+                const yScale = d3.scaleBand()
+                    .domain(weatherColumns)
+                    .range([0, heatmapHeight])
+                    .padding(0);
+                
+                // Color mapping for weather types
+                const weatherColors = {
+                    "Winter": "#6B8FAF",      // grey blue
+                    "Fall": "#8B4513",        // dark reddish brown
+                    "Summer": "#FF1493",      // hot pink
+                    "Spring": "#9370DB",      // darker lavender
+                    "Hot": "#FF6600",         // bright orange
+                    "Sunny": "#FFD700",       // lighter yellow (gold)
+                    "Rainy": "#000000",       // black
+                    "Cold": "#000080",        // dark navy
+                    "Snowy": "#D3D3D3",       // light grey
+                    "Cloudy": "#555555",      // dark grey
+                    "Breezy": "#90EE90"       // light green
+                };
+                
+                // Color scale - blue tones based on association count with multiple gradient stops
+                // Maps number of weather categories (0 to maxCategories) to colors
+                // Define gradient colors array for use in both color scale and legend
+                const gradientColors = [
+                    "#e6f7ff", "#cceeff", "#b3e6ff", "#99ddff", "#80d4ff",
+                    "#66ccff", "#4dc3ff", "#33bbff", "#1ab2ff", "#00aaff", "#0099e6"
+                ];
+                const maxCategories = weatherColumns.length; // Should be 11
+                const colorScale = d3.scaleSequential()
+                    .domain([0, maxCategories])
+                    .interpolator(d3.piecewise(d3.interpolateRgb, gradientColors));
+                
+                // Calculate total height - legend is now in header, not in SVG
+                // Add extra space at bottom for rotated x-axis labels
+                const legendSpace = 0;
+                const xAxisLabelHeight = 100; // Extra space for rotated song name labels
+                const totalHeight = heatmapHeight + margin.bottom + xAxisLabelHeight;
+                
+                // Create SVG - ensure all columns are visible, centered
+                const svg = d3.select("#chart")
+                    .append("svg")
+                    .attr("width", totalWidth)
+                    .attr("height", totalHeight)
+                    .style("background", "#fffef0")
+                    .style("min-width", totalWidth + "px");
+                
+                // Position map at top, starting from left margin (no centering to prevent cutoff)
+                const mapTop = 0;
+                const centerOffset = margin.left;
+                const mainGroup = svg.append("g")
+                    .attr("transform", `translate(${centerOffset},${mapTop})`);
+                
+                // Create separate group for y-axis labels, positioned right against the first column
+                const yAxisX = centerOffset; // Position y-axis labels right at the start of first column
+                const finalYAxisX = yAxisX;
+                const yAxisGroup = svg.append("g")
+                    .attr("transform", `translate(${finalYAxisX},${mapTop})`);
+                
+                console.log("Y-axis group position:", finalYAxisX, mapTop);
+                console.log("Weather columns:", weatherColumns);
+                console.log("Y-scale domain:", yScale.domain());
+                console.log("Center offset:", centerOffset);
+                
+                // Create heatmap cells with original color logic based on association counts
+                orderedSongs.forEach((song, songIdx) => {
+                    const originalIndex = orderedIndices[songIdx];
+                    const row = data[originalIndex];
+                    const songAssociations = songAssociationCounts[row.Song];
+                    
+                    // Store the actual song name from the row data (not from the ordered list)
+                    // This ensures we have the exact song name as it appears in the CSV
+                    const actualSongName = row.Song;
+                    
+                    weatherColumns.forEach((weather, weatherIdx) => {
+                        const isAssociated = row[weather] === "yes";
+                        
+                        // Color is based on total number of categories the song has
+                        // But only show color if the song is associated with this specific weather category
+                        const value = isAssociated ? songAssociations : null;
+                        
+                        const originalFill = value !== null ? colorScale(value) : "#fffef0";
+                        const cell = mainGroup.append("rect")
+                            .attr("class", "heatmap-cell")
+                            .attr("x", xScale(song))
+                            .attr("y", yScale(weather))
+                            .attr("width", xScale.bandwidth())
+                            .attr("height", yScale.bandwidth())
+                            .attr("fill", originalFill) // Blank/background color if not associated
+                            .style("cursor", isAssociated ? "pointer" : "default")
+                            .datum({ originalFill: originalFill, weather: weather, songName: actualSongName }) // Store song name in datum
+                            .on("mouseover", function(event, d) {
+                                if (isAssociated) {
+                                    // Stop any currently playing audio first
+                                    audioManager.stop();
+                                    
+                                    // No tooltip - just play audio and highlight
+                                    // Play audio clip for this song - use actualSongName to ensure correct filename
+                                    console.log("Playing audio for:", actualSongName);
+                                    audioManager.playSong(actualSongName);
+                                    
+                                    // Highlight cell with weather category color
+                                    d3.select(this)
+                                        .attr("fill", weatherColors[d.weather] || d.originalFill);
+                                }
+                            })
+                            .on("mouseout", function(event, d) {
+                                // Restore original color
+                                d3.select(this)
+                                    .attr("fill", d.originalFill);
+                                // Always stop audio when mouse leaves any cell
+                                audioManager.stop();
+                            });
+                    });
+                });
+                
+                // Add y-axis (weather types) on the left - in separate group
+                // Create axis with all weather types
+                const yAxis = d3.axisLeft(yScale)
+                    .tickSize(0)
+                    .tickFormat(d => d); // Show all labels
+                
+                const yAxisG = yAxisGroup.append("g")
+                    .attr("class", "y-axis");
+                
+                // Call the axis
+                yAxisG.call(yAxis);
+                
+                // Style the y-axis labels to ensure they're visible
+                const yAxisTexts = yAxisG.selectAll("text");
+                console.log("Y-axis text elements found:", yAxisTexts.size());
+                console.log("Y-axis text data:", yAxisTexts.data());
+                
+                yAxisTexts
+                    .attr("class", "axis-label")
+                    .style("text-anchor", "end")
+                    .attr("dx", "-5px") // Small gap from first column edge
+                    .style("font-size", "12px")
+                    .style("fill", d => weatherColors[d] || "#333") // Use weather-specific colors
+                    .style("opacity", 1)
+                    .style("visibility", "visible")
+                    .style("display", "block");
+                
+                // Also ensure the axis line and ticks are visible if needed
+                yAxisG.selectAll("path")
+                    .style("stroke", "#333")
+                    .style("opacity", 1);
+                
+                yAxisG.selectAll("line")
+                    .style("stroke", "#333")
+                    .style("opacity", 1);
+                
+                // Add x-axis (song names) at the bottom
+                const xAxis = d3.axisBottom(xScale)
+                    .tickSize(0)
+                    .tickFormat(d => d); // Show song names
+                
+                const xAxisG = mainGroup.append("g")
+                    .attr("class", "x-axis")
+                    .attr("transform", `translate(0,${heatmapHeight})`)
+                    .call(xAxis);
+                
+                // Style the x-axis labels - rotate them at a slight angle
+                xAxisG.selectAll("text")
+                    .attr("class", "axis-label")
+                    .style("text-anchor", "end")
+                    .attr("dx", "-0.5em")
+                    .attr("dy", "0.5em")
+                    .attr("transform", "rotate(-30)") // Rotate -30 degrees for slight slant
+                    .style("font-size", "9px")
+                    .style("fill", "#333")
+                    .style("opacity", 1)
+                    .style("visibility", "visible");
+                
+                // Style the axis line and ticks
+                xAxisG.selectAll("path")
+                    .style("stroke", "#333")
+                    .style("opacity", 1);
+                
+                xAxisG.selectAll("line")
+                    .style("stroke", "#333")
+                    .style("opacity", 1);
+                
+                // Add horizontal legend next to title in header
+                const legendContainer = d3.select("#legend-container");
+                const legendWidth = 400;
+                const legendHeight = 30;
+                
+                const legendSvg = legendContainer.append("svg")
+                    .attr("width", legendWidth + 200) // Extra space for labels
+                    .attr("height", legendHeight + 80) // Extra space for title and labels (increased)
+                    .style("overflow", "visible"); // Ensure nothing is clipped
+                
+                const legendDefs = legendSvg.append("defs");
+                
+                // Scale from 0 to maxCategories (horizontal)
+                const legendScale = d3.scaleLinear()
+                    .domain([0, maxCategories]) // 0 at left, maxCategories at right
+                    .range([0, legendWidth]);
+                
+                // Create tick values for 0 through maxCategories
+                const tickValues = d3.range(0, maxCategories + 1);
+                
+                const legendAxis = d3.axisBottom(legendScale)
+                    .tickValues(tickValues)
+                    .tickFormat(d => {
+                        if (d === 0) return "Weatherless";
+                        if (d === maxCategories) return "Total Storm";
+                        return d.toString(); // Show number for intermediate ticks
+                    })
+                    .tickSize(6);
+                
+                const legend = legendSvg.append("g")
+                    .attr("transform", `translate(0,${legendHeight + 20})`);
+                
+                // Legend gradient with multiple color stops (horizontal orientation)
+                const legendGradient = legendDefs.append("linearGradient")
+                    .attr("id", "legend-gradient")
+                    .attr("x1", "0%")
+                    .attr("x2", "100%")
+                    .attr("y1", "0%")
+                    .attr("y2", "0%"); // Horizontal gradient from left to right
+                
+                // Add color stops for all gradient colors
+                // Left (0%) should be lightest (#e6f7ff) for 0, right (100%) should be darkest (#0099e6) for maxCategories
+                gradientColors.forEach((color, i) => {
+                    const offset = (i / (gradientColors.length - 1)) * 100 + "%";
+                legendGradient.append("stop")
+                        .attr("offset", offset)
+                        .attr("stop-color", color);
+                });
+                
+                // Legend bar (horizontal rectangle)
+                legend.append("rect")
+                    .attr("width", legendWidth)
+                    .attr("height", legendHeight)
+                    .style("fill", "url(#legend-gradient)");
+                
+                // Axis with ticks and labels
+                const legendAxisG = legend.append("g")
+                    .attr("transform", `translate(0,${legendHeight})`)
+                    .call(legendAxis);
+                
+                // Style the axis text - ensure labels are visible and positioned correctly
+                legendAxisG.selectAll("text")
+                    .style("font-size", "11px")
+                    .style("fill", "#333")
+                    .style("opacity", 1)
+                    .style("visibility", "visible")
+                    .attr("dy", "1.2em") // Position labels below ticks (increased)
+                    .style("text-anchor", "middle")
+                    .style("overflow", "visible"); // Ensure text is not clipped
+                
+                // Style the axis ticks (lines)
+                legendAxisG.selectAll("line")
+                    .style("stroke", "#333")
+                    .style("stroke-width", 1)
+                    .style("opacity", 1);
+                
+                // Style the axis path (main line)
+                legendAxisG.selectAll("path")
+                    .style("stroke", "#333")
+                    .style("stroke-width", 1)
+                    .style("opacity", 1);
+                
+                // Title "Forecast"
+                legend.append("text")
+                    .attr("x", legendWidth / 2)
+                    .attr("y", -5)
+                    .style("text-anchor", "middle")
+                    .style("font-size", "12px")
+                    .style("font-weight", "bold")
+                    .style("fill", "#333")
+                    .text("Forecast");
+                
+                console.log("Heatmap visualization complete!");
+            } catch (error) {
+                console.error("Error creating visualization:", error);
+                document.getElementById('chart').innerHTML = '<p style="color: red; text-align: center; padding: 50px;">Error: ' + error.message + '<br/>Check the browser console for details.</p>';
+            }
+        });
+    </script>
+</body>
+</html>
